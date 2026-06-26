@@ -8,8 +8,12 @@ import anthropic
 import openpyxl
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -18,48 +22,86 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# Модель Claude. Можно поменять в Railway через переменную ANTHROPIC_MODEL.
-# Если переменной нет, бот использует эту модель.
-ANTHROPIC_MODEL = os.environ.get(
-    "ANTHROPIC_MODEL",
-    "claude-3-5-sonnet-20241022"
-)
+# Модель можно менять в Railway через переменную ANTHROPIC_MODEL.
+# Если переменной нет, используется claude-haiku-4-5.
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 SYSTEM_PROMPT = """Ты помощник для анализа рукописных списков деталей мебели для программы раскроя GibLab.
 Анализируй фото и возвращай ТОЛЬКО JSON без пояснений, без markdown, без ```json.
 
+ЗАДАЧА:
+Нужно распознать рукописные размеры мебельных деталей и подготовить JSON для Excel/GibLab.
+
+ФОРМАТ ЗАПИСИ НА ФОТО:
+Обычно строки выглядят так:
+77 x 75 = 2
+77 x 39 = 1
+98 x 75 = 2
+98 x 37 = 1
+84 x 65 = 1
+60 x 65 = 1
+
+Где:
+- первое число = length
+- второе число = width
+- число после "=" = qty
+- если количество не написано, qty=1
+
 ПРАВИЛА ПРЕОБРАЗОВАНИЯ РАЗМЕРОВ:
-- Если число написано без точки и похоже на мебельный размер, оставляй как есть.
-- Если число написано с точкой, убирай точку:
+1. Если число написано с точкой, убирай точку:
 39.8 → 398
 200.8 → 2008
 150.6 → 1506
 77.5 → 775
 98.7 → 987
 
-ВАЖНО:
-- 160 означает 160, если на фото явно написано 160.
-- 1600 означает 1600, если на фото явно написано 1600.
-- Не придумывай лишний ноль без причины.
+2. Если число написано без точки и это короткий мебельный размер, умножай на 10:
+77 → 770
+75 → 750
+39 → 390
+98 → 980
+37 → 370
+84 → 840
+65 → 650
+60 → 600
 
-ПРАВИЛА КРОМКИ — определяй ТОЛЬКО по подчёркиваниям под числами:
+3. Если число уже длинное, оставляй как есть:
+1600 → 1600
+2008 → 2008
+1506 → 1506
+770 → 770
+750 → 750
+
+4. Не добавляй лишний ноль, если размер уже явно написан в миллиметрах.
+
+ПРАВИЛА КРОМКИ:
+Кромку определяй ТОЛЬКО по подчёркиваниям под числами.
+
+Поля:
+- e и f относятся к length
+- g и h относятся к width
+
+Правила:
 - Нет подчёркиваний → e="", f="", g="", h=""
-- Одна черта под длиной → e="Кромка", остальные ""
+- Одна черта под длиной → e="Кромка", f="", g="", h=""
 - Две черты под длиной → e="Кромка", f="Кромка", g="", h=""
-- Одна черта под шириной → g="Кромка", остальные ""
-- Две черты под шириной → g="Кромка", h="Кромка", e="", f=""
-- Двойное подчёркивание под обоими → e="Кромка", f="Кромка", g="Кромка", h="Кромка"
+- Одна черта под шириной → e="", f="", g="Кромка", h=""
+- Две черты под шириной → e="", f="", g="Кромка", h="Кромка"
+- Подчёркнута длина и ширина → ставь кромку на соответствующие стороны
 
-Если рядом с размером написано количество, например:
-77 x 75 = 2
-то qty=2.
+ВАЖНО:
+- Не придумывай детали, которых нет на фото.
+- Если строка плохо читается, всё равно постарайся распознать.
+- Возвращай только валидный JSON.
+- Никакого текста до JSON и после JSON.
+- Никакого markdown.
+- Никаких ```json.
 
-Если количество не указано, ставь qty=1.
-
-Возвращай ТОЛЬКО JSON:
-{"parts":[{"length":770,"width":750,"qty":2,"e":"Кромка","f":"","g":"","h":""}]}"""
+Возвращай строго в таком формате:
+{"parts":[{"length":770,"width":750,"qty":2,"e":"","f":"","g":"","h":""}]}
+"""
 
 user_photos = {}
 
@@ -73,7 +115,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3️⃣ Нажми кнопку *«Создать XLSX»*\n"
         "4️⃣ Получи файл готовый для GibLab\n\n"
         "📸 Отправляй первое фото!",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
 
 
@@ -94,14 +136,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     count = len(user_photos[user_id])
 
-    keyboard = [[InlineKeyboardButton(
-        f"✅ Создать XLSX ({count} фото)",
-        callback_data="process"
-    )]]
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"✅ Создать XLSX ({count} фото)",
+                callback_data="process",
+            )
+        ]
+    ]
 
     await update.message.reply_text(
         f"📸 Фото {count} добавлено.\nМожешь добавить ещё или нажми кнопку:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -119,25 +165,31 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(f"⏳ Анализирую {len(photos)} фото, подожди...")
 
+    raw = ""
+
     try:
         content = []
 
         for photo_data in photos:
             b64 = base64.standard_b64encode(photo_data).decode("utf-8")
 
-            content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": b64
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": b64,
+                    },
                 }
-            })
+            )
 
-        content.append({
-            "type": "text",
-            "text": "Проанализируй все фото и верни JSON со ВСЕМИ деталями из всех фото одним списком."
-        })
+        content.append(
+            {
+                "type": "text",
+                "text": "Проанализируй все фото и верни JSON со ВСЕМИ деталями из всех фото одним списком.",
+            }
+        )
 
         response = client.messages.create(
             model=ANTHROPIC_MODEL,
@@ -146,16 +198,19 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=[
                 {
                     "role": "user",
-                    "content": content
+                    "content": content,
                 }
-            ]
+            ],
         )
 
         raw = response.content[0].text.strip()
 
-        # Чистим случайный markdown, потому что даже модели иногда ведут себя как стажёр после обеда.
-        if "```" in raw:
+        # Чистка на случай, если модель всё-таки завернула ответ в markdown.
+        # Потому что даже искусственный интеллект иногда ведёт себя как человек на понедельничном совещании.
+        if "```json" in raw:
             raw = raw.replace("```json", "").replace("```", "").strip()
+        elif "```" in raw:
+            raw = raw.replace("```", "").strip()
 
         data = json.loads(raw)
         parts = data.get("parts", [])
@@ -163,7 +218,7 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not parts:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="❌ Не нашёл деталей на фото. Попробуй отправить фото чётче."
+                text="❌ Не нашёл деталей на фото. Попробуй отправить фото чётче.",
             )
             user_photos[user_id] = []
             return
@@ -173,16 +228,18 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ws.title = "GibLab"
 
         for p in parts:
-            ws.append([
-                p.get("length", ""),
-                p.get("width", ""),
-                p.get("qty", ""),
-                "",
-                p.get("e", ""),
-                p.get("f", ""),
-                p.get("g", ""),
-                p.get("h", ""),
-            ])
+            ws.append(
+                [
+                    p.get("length", ""),
+                    p.get("width", ""),
+                    p.get("qty", ""),
+                    "",
+                    p.get("e", ""),
+                    p.get("f", ""),
+                    p.get("g", ""),
+                    p.get("h", ""),
+                ]
+            )
 
         output = BytesIO()
         wb.save(output)
@@ -192,7 +249,7 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=update.effective_chat.id,
             document=output,
             filename="giblab_import.xlsx",
-            caption=f"✅ Готово! {len(parts)} деталей → GibLab"
+            caption=f"✅ Готово! {len(parts)} деталей → GibLab",
         )
 
         user_photos[user_id] = []
@@ -202,7 +259,7 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="❌ Claude ответил не JSON. Попробуй ещё раз или пришли более чёткое фото."
+            text="❌ Claude ответил не JSON. Попробуй ещё раз или пришли более чёткое фото.",
         )
 
         user_photos[user_id] = []
@@ -212,7 +269,7 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"❌ Ошибка: {str(e)}\nПопробуй снова."
+            text=f"❌ Ошибка: {str(e)}\nПопробуй снова.",
         )
 
         user_photos[user_id] = []
@@ -232,14 +289,14 @@ def main():
     if not ANTHROPIC_API_KEY:
         raise ValueError("ANTHROPIC_API_KEY не найден в Railway Variables.")
 
+    logger.info("Bot started with Claude model: %s", ANTHROPIC_MODEL)
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(CallbackQueryHandler(process_photos, pattern="process"))
-
-    logger.info("Bot started with Claude model: %s", ANTHROPIC_MODEL)
 
     app.run_polling()
 
