@@ -20,58 +20,37 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Убираем подробные httpx-логи, чтобы Telegram-токен не светился в Railway Logs
+# Убираем подробные httpx-логи, чтобы не светить токены в Railway Logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# Основная модель.
-# Если в Railway есть ANTHROPIC_MODEL, бот сначала попробует её.
-# Если модели нет или будет 404, бот попробует запасные варианты.
+# Основная модель можно задать в Railway переменной ANTHROPIC_MODEL
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 MODEL_CANDIDATES = []
 if ANTHROPIC_MODEL:
     MODEL_CANDIDATES.append(ANTHROPIC_MODEL)
 
-# Запасные модели. Если первая не работает, бот попробует следующую.
 for model_name in ["claude-sonnet-4-6", "claude-haiku-4-5"]:
     if model_name not in MODEL_CANDIDATES:
         MODEL_CANDIDATES.append(model_name)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-SYSTEM_PROMPT = """Ты помощник для анализа списков деталей мебели для программы раскроя GibLab.
-Анализируй фото, скриншот таблицы или рукописный список и возвращай ТОЛЬКО JSON.
-Без пояснений, без markdown, без ```json.
+# -----------------------------
+# PROMPTS
+# -----------------------------
 
-ЗАДАЧА:
-Нужно распознать размеры мебельных деталей и подготовить JSON для Excel/GibLab.
+SYSTEM_PROMPT_EXTRACT = """Ты помощник для анализа списков деталей мебели для программы раскроя GibLab.
+Твоя задача в этом запросе: распознать ТОЛЬКО размеры и количество деталей.
+НЕ анализируй кромку в этом запросе.
+Возвращай ТОЛЬКО JSON без пояснений, без markdown, без ```json.
 
-СТРУКТУРА GIBLAB:
-В Excel должны быть такие колонки:
+Нужно распознать строки деталей.
 
-A = Д-на = length
-B = Ш-на = width
-C = Кол = qty
-D = Ткт
-E = ОВ = оклейка кромки сверху, по длине
-F = ОН = оклейка кромки снизу, по длине
-G = ОЛ = оклейка кромки слева, по ширине
-H = ОП = оклейка кромки справа, по ширине
-
-В JSON используй поля:
-length, width, qty, e, f, g, h
-
-Соответствие:
-e = ОВ
-f = ОН
-g = ОЛ
-h = ОП
-
-ФОРМАТ СТРОКИ:
 Строка может выглядеть так:
 77 x 75 = 2
 77 x 39 = 1
@@ -108,6 +87,9 @@ h = ОП
 150.6 → 1506
 77.5 → 775
 98.7 → 987
+61.8 → 618
+60.8 → 608
+37.6 → 376
 
 3. Если на рукописном фото короткие размеры написаны как 77 x 75, переводи в миллиметры:
 77 → 770
@@ -119,105 +101,90 @@ h = ОП
 65 → 650
 60 → 600
 
-4. Если это уже таблица с размерами 2255, 550, 150, 303, 70, 133, 320, 350, 577, ничего не умножай.
-
-ПРАВИЛА КРОМКИ — САМОЕ ВАЖНОЕ:
-На фото или скриншоте под некоторыми числами есть чёрные горизонтальные подчёркивания.
-Эти подчёркивания означают кромку.
-
-Игнорируй:
-- линии таблицы;
-- вертикальные линии;
-- рамки ячеек;
-- границы строк;
-- линии между строками.
-
-Учитывай только короткую чёрную линию прямо под самим числом.
-
-КРИТИЧЕСКОЕ ПРАВИЛО:
-Если подчёркнуто число в ПЕРВОМ столбце, то это кромка по длине:
-e="Кромка"
-
-Если подчёркнуто число во ВТОРОМ столбце, то это кромка по ширине:
-g="Кромка"
-
-Если под числом две отдельные линии:
-для первого столбца e="Кромка", f="Кромка"
-для второго столбца g="Кромка", h="Кромка"
-
-ОБЫЧНЫЕ ПРАВИЛА:
-1. Если подчёркнут первый размер length одной линией:
-   e="Кромка", f="", g="", h=""
-
-2. Если подчёркнут первый размер length двумя линиями:
-   e="Кромка", f="Кромка", g="", h=""
-
-3. Если подчёркнут второй размер width одной линией:
-   e="", f="", g="Кромка", h=""
-
-4. Если подчёркнут второй размер width двумя линиями:
-   e="", f="", g="Кромка", h="Кромка"
-
-5. Если подчёркнуты оба размера:
-   ставь кромку и для length, и для width по количеству линий.
-
-6. Если подчёркивание видно даже слабо, но оно находится прямо под числом, считай это кромкой.
-
-7. Если кромка есть, обязательно заполни соответствующие поля словом "Кромка".
-
-ПРИМЕРЫ:
-Если строка:
-2255 подчёркнуто, 550, qty 2
-то:
-{"length":2255,"width":550,"qty":2,"e":"Кромка","f":"","g":"","h":""}
-
-Если строка:
-1134, 303 подчёркнуто, qty 1
-то:
-{"length":1134,"width":303,"qty":1,"e":"","f":"","g":"Кромка","h":""}
-
-Если строка:
-850 подчёркнуто, 350 подчёркнуто, qty 6
-то:
-{"length":850,"width":350,"qty":6,"e":"Кромка","f":"","g":"Кромка","h":""}
-
-Если строка:
-626 подчёркнуто, 577, qty 3
-то:
-{"length":626,"width":577,"qty":3,"e":"Кромка","f":"","g":"","h":""}
+4. Если это уже печатная таблица с размерами 2255, 550, 150, 303, 70, 133, 320, 350, 577, ничего не умножай.
 
 ВАЖНО:
-- Не придумывай детали, которых нет на фото.
-- Не пропускай подчёркивания.
-- Не путай подчёркивание числа с линией таблицы.
-- Если короткая линия прямо под цифрами, это кромка.
+- Не анализируй кромку.
+- Не придумывай строки, которых нет.
+- Сохраняй порядок строк сверху вниз.
 - Если строка плохо читается, всё равно постарайся распознать.
-- Для каждой детали обязательно верни поля: length, width, qty, e, f, g, h.
 - Возвращай только валидный JSON.
-- Никакого текста до JSON и после JSON.
-- Никакого markdown.
-- Никаких ```json.
 
-Возвращай строго в таком формате:
-{"parts":[{"length":2255,"width":550,"qty":2,"e":"Кромка","f":"","g":"","h":""}]}
+Формат ответа строго такой:
+{"parts":[{"length":2255,"width":550,"qty":2}]}
+"""
+
+SYSTEM_PROMPT_EDGES = """Ты помощник для анализа кромки деталей мебели для программы раскроя GibLab.
+Твоя задача в этом запросе: определить ТОЛЬКО кромку по уже известным строкам.
+Возвращай ТОЛЬКО JSON без пояснений, без markdown, без ```json.
+
+ВАЖНО:
+На изображении могут быть:
+1) рукописные строки
+2) печатная таблица с сеткой
+
+ПРАВИЛО:
+Тебя интересуют ТОЛЬКО короткие подчёркивания непосредственно под числами.
+
+НЕ СЧИТАЙ кромкой:
+- обычные линии таблицы;
+- длинные горизонтальные линии, которые тянутся от одной вертикальной границы ячейки к другой;
+- нижние границы ячеек;
+- сетку таблицы.
+
+СЧИТАЙ кромкой только:
+- короткую отдельную линию прямо под числом;
+- линию, которая заметно короче ширины ячейки;
+- линию, которая визуально относится именно к числу, а не к границе таблицы.
+
+СТОЛБЦЫ:
+- первое число в строке = length
+- второе число в строке = width
+
+ПОЛЯ КРОМКИ:
+- e = ОВ = кромка сверху по длине
+- f = ОН = кромка снизу по длине
+- g = ОЛ = кромка слева по ширине
+- h = ОП = кромка справа по ширине
+
+ПРАВИЛА:
+1. Если подчёркнуто первое число одной линией:
+   e="Кромка", f="", g="", h=""
+
+2. Если подчёркнуто первое число двумя линиями:
+   e="Кромка", f="Кромка", g="", h=""
+
+3. Если подчёркнуто второе число одной линией:
+   e="", f="", g="Кромка", h=""
+
+4. Если подчёркнуто второе число двумя линиями:
+   e="", f="", g="Кромка", h="Кромка"
+
+5. Если подчёркнуты оба числа:
+   заполни и length, и width по количеству линий.
+
+6. Если кромки нет:
+   e="", f="", g="", h=""
+
+КРИТИЧНО:
+- В печатной таблице линия сетки под числом НЕ является кромкой.
+- Если сомневаешься между "линия таблицы" и "подчёркивание", выбирай "линия таблицы".
+- Кромку ставь только когда отдельное подчёркивание действительно видно.
+
+Ты получишь список строк в правильном порядке.
+Для каждой строки верни один объект с полями:
+row, e, f, g, h
+
+Формат ответа строго такой:
+{"rows":[{"row":1,"e":"","f":"","g":"Кромка","h":""}]}
 """
 
 user_photos = {}
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 *Привет! Я бот для раскроя GibLab.*\n\n"
-        "Как работать:\n"
-        "1️⃣ Отправь фото или скриншот списка деталей\n"
-        "2️⃣ Лучше отправлять как *Файл*, а не как обычное фото — так качество выше\n"
-        "3️⃣ Если листов несколько — отправляй по одному\n"
-        "4️⃣ Нажми кнопку *«Создать XLSX»*\n"
-        "5️⃣ Получи файл готовый для GibLab\n\n"
-        "📸 Отправляй первое фото или файл!",
-        parse_mode="Markdown",
-    )
-
+# -----------------------------
+# HELPERS
+# -----------------------------
 
 def get_keyboard(count: int):
     return InlineKeyboardMarkup(
@@ -232,19 +199,191 @@ def get_keyboard(count: int):
     )
 
 
-async def save_user_image(update: Update, context: ContextTypes.DEFAULT_TYPE, image_bytes: bytes):
+def image_to_content_block(image_bytes: bytes, mime_type: str):
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": mime_type,
+            "data": b64,
+        },
+    }
+
+
+async def save_user_image(update: Update, image_bytes: bytes, mime_type: str):
     user_id = update.effective_user.id
 
     if user_id not in user_photos:
         user_photos[user_id] = []
 
-    user_photos[user_id].append(image_bytes)
+    user_photos[user_id].append(
+        {
+            "bytes": image_bytes,
+            "mime_type": mime_type,
+        }
+    )
 
     count = len(user_photos[user_id])
 
     await update.message.reply_text(
         f"📸 Фото {count} добавлено.\nМожешь добавить ещё или нажми кнопку:",
         reply_markup=get_keyboard(count),
+    )
+
+
+async def call_claude_json(system_prompt: str, content: list):
+    last_error = None
+
+    for model_name in MODEL_CANDIDATES:
+        try:
+            logger.info("Trying Claude model: %s", model_name)
+
+            response = client.messages.create(
+                model=model_name,
+                max_tokens=4000,
+                system=system_prompt,
+                messages=[{"role": "user", "content": content}],
+            )
+
+            raw = response.content[0].text.strip()
+            logger.info("Claude model used: %s", model_name)
+            logger.info("Claude raw answer: %s", raw)
+
+            if "```json" in raw:
+                raw = raw.replace("```json", "").replace("```", "").strip()
+            elif "```" in raw:
+                raw = raw.replace("```", "").strip()
+
+            return json.loads(raw)
+
+        except Exception as e:
+            last_error = e
+            error_text = str(e)
+            logger.error("Claude model failed: %s | Error: %s", model_name, error_text)
+
+            if "not_found_error" in error_text or "404" in error_text or "model:" in error_text:
+                continue
+
+            raise e
+
+    raise last_error
+
+
+async def extract_parts_from_image(image_bytes: bytes, mime_type: str):
+    content = [
+        image_to_content_block(image_bytes, mime_type),
+        {
+            "type": "text",
+            "text": (
+                "Распознай все строки деталей на этом изображении. "
+                "Верни только размеры и количество. "
+                "Не анализируй кромку. "
+                "Сохрани порядок строк сверху вниз."
+            ),
+        },
+    ]
+
+    data = await call_claude_json(SYSTEM_PROMPT_EXTRACT, content)
+    return data.get("parts", [])
+
+
+async def extract_edges_from_image(image_bytes: bytes, mime_type: str, parts: list):
+    rows_for_prompt = []
+    for idx, p in enumerate(parts, start=1):
+        rows_for_prompt.append(
+            {
+                "row": idx,
+                "length": p.get("length", ""),
+                "width": p.get("width", ""),
+                "qty": p.get("qty", ""),
+            }
+        )
+
+    content = [
+        image_to_content_block(image_bytes, mime_type),
+        {
+            "type": "text",
+            "text": (
+                "Ниже уже распознанные строки таблицы/списка. "
+                "Для каждой строки определи только кромку. "
+                "Очень важно: не путай нижнюю границу ячейки таблицы с подчёркиванием. "
+                "Если под числом только обычная линия сетки таблицы, кромку не ставь. "
+                "Если под числом есть короткое отдельное подчёркивание, ставь кромку.\n\n"
+                f"Строки:\n{json.dumps(rows_for_prompt, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+    data = await call_claude_json(SYSTEM_PROMPT_EDGES, content)
+    return data.get("rows", [])
+
+
+def merge_parts_and_edges(parts: list, edge_rows: list):
+    edges_map = {}
+    for row in edge_rows:
+        row_num = row.get("row")
+        if isinstance(row_num, int):
+            edges_map[row_num] = row
+
+    merged = []
+    for idx, part in enumerate(parts, start=1):
+        edge = edges_map.get(idx, {})
+        merged.append(
+            {
+                "length": part.get("length", ""),
+                "width": part.get("width", ""),
+                "qty": part.get("qty", 1),
+                "e": edge.get("e", ""),
+                "f": edge.get("f", ""),
+                "g": edge.get("g", ""),
+                "h": edge.get("h", ""),
+            }
+        )
+
+    return merged
+
+
+def build_excel(parts: list):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "GibLab"
+
+    for p in parts:
+        ws.append(
+            [
+                p.get("length", ""),
+                p.get("width", ""),
+                p.get("qty", ""),
+                "",
+                p.get("e", ""),
+                p.get("f", ""),
+                p.get("g", ""),
+                p.get("h", ""),
+            ]
+        )
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+
+# -----------------------------
+# HANDLERS
+# -----------------------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 *Привет! Я бот для раскроя GibLab.*\n\n"
+        "Как работать:\n"
+        "1️⃣ Отправь фото, скриншот или изображение таблицы\n"
+        "2️⃣ Лучше отправлять как *Файл*, если таблица цифровая\n"
+        "3️⃣ Если листов несколько — отправляй по одному\n"
+        "4️⃣ Нажми кнопку *«Создать XLSX»*\n"
+        "5️⃣ Получи файл готовый для GibLab\n\n"
+        "📸 Отправляй первое фото или файл!",
+        parse_mode="Markdown",
     )
 
 
@@ -256,7 +395,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_memory(photo_bytes)
     photo_bytes.seek(0)
 
-    await save_user_image(update, context, photo_bytes.read())
+    await save_user_image(update, photo_bytes.read(), "image/jpeg")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -277,7 +416,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mime_type not in allowed_mime_types:
         await update.message.reply_text(
             "❌ Сейчас я принимаю только изображения: JPG, PNG или WEBP.\n"
-            "Отправь скриншот или фото как файл."
+            "Отправь изображение как файл."
         )
         return
 
@@ -287,43 +426,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await file.download_to_memory(photo_bytes)
     photo_bytes.seek(0)
 
-    await save_user_image(update, context, photo_bytes.read())
-
-
-async def call_claude_with_fallback(content):
-    last_error = None
-
-    for model_name in MODEL_CANDIDATES:
-        try:
-            logger.info("Trying Claude model: %s", model_name)
-
-            response = client.messages.create(
-                model=model_name,
-                max_tokens=4000,
-                system=SYSTEM_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": content,
-                    }
-                ],
-            )
-
-            logger.info("Claude model used: %s", model_name)
-            return response
-
-        except Exception as e:
-            last_error = e
-            error_text = str(e)
-
-            logger.error("Claude model failed: %s | Error: %s", model_name, error_text)
-
-            if "not_found_error" in error_text or "404" in error_text or "model:" in error_text:
-                continue
-
-            raise e
-
-    raise last_error
+    await save_user_image(update, photo_bytes.read(), mime_type)
 
 
 async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -336,130 +439,69 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Нет фото. Сначала отправь фото или файл.")
         return
 
-    photos = user_photos[user_id]
+    images = user_photos[user_id]
 
-    await query.edit_message_text(f"⏳ Анализирую {len(photos)} фото, подожди...")
-
-    raw = ""
+    await query.edit_message_text(f"⏳ Анализирую {len(images)} фото, подожди...")
 
     try:
-        content = []
+        all_parts = []
 
-        for photo_data in photos:
-            b64 = base64.standard_b64encode(photo_data).decode("utf-8")
+        for image_index, image_item in enumerate(images, start=1):
+            image_bytes = image_item["bytes"]
+            mime_type = image_item["mime_type"]
 
-            content.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": b64,
-                    },
-                }
-            )
+            logger.info("Processing image %s", image_index)
 
-        content.append(
-            {
-                "type": "text",
-                "text": (
-                    "Проанализируй все фото. "
-                    "Особое внимание удели коротким чёрным подчёркиваниям прямо под числами: они означают кромку. "
-                    "Если подчёркнут первый столбец, заполни e='Кромка'. "
-                    "Если подчёркнут второй столбец, заполни g='Кромка'. "
-                    "Верни JSON со ВСЕМИ деталями из всех фото одним списком. "
-                    "Для каждой строки обязательно заполни length, width, qty, e, f, g, h."
-                ),
-            }
-        )
+            parts = await extract_parts_from_image(image_bytes, mime_type)
+            logger.info("Extracted parts from image %s: %s", image_index, parts)
 
-        response = await call_claude_with_fallback(content)
+            if not parts:
+                continue
 
-        raw = response.content[0].text.strip()
+            edge_rows = await extract_edges_from_image(image_bytes, mime_type, parts)
+            logger.info("Extracted edges from image %s: %s", image_index, edge_rows)
 
-        logger.info("Claude raw answer: %s", raw)
+            merged = merge_parts_and_edges(parts, edge_rows)
+            all_parts.extend(merged)
 
-        if "```json" in raw:
-            raw = raw.replace("```json", "").replace("```", "").strip()
-        elif "```" in raw:
-            raw = raw.replace("```", "").strip()
-
-        data = json.loads(raw)
-        parts = data.get("parts", [])
-
-        if not parts:
+        if not all_parts:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="❌ Не нашёл деталей на фото. Попробуй отправить фото чётче или как файл.",
+                text="❌ Не удалось распознать детали. Попробуй отправить изображение чётче или как файл.",
             )
             user_photos[user_id] = []
             return
 
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "GibLab"
-
-        for p in parts:
-            length = p.get("length", "")
-            width = p.get("width", "")
-            qty = p.get("qty", "")
-
-            e = p.get("e", "")
-            f = p.get("f", "")
-            g = p.get("g", "")
-            h = p.get("h", "")
-
-            ws.append(
-                [
-                    length,
-                    width,
-                    qty,
-                    "",
-                    e,
-                    f,
-                    g,
-                    h,
-                ]
-            )
-
-        output = BytesIO()
-        wb.save(output)
-        output.seek(0)
+        output = build_excel(all_parts)
 
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=output,
             filename="giblab_import.xlsx",
-            caption=f"✅ Готово! {len(parts)} деталей → GibLab",
+            caption=f"✅ Готово! {len(all_parts)} деталей → GibLab",
         )
 
         user_photos[user_id] = []
 
     except json.JSONDecodeError:
-        logger.error("JSON decode error. Raw answer: %s", raw)
-
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="❌ Claude ответил не JSON. Попробуй ещё раз или отправь фото как файл.",
+            text="❌ Claude вернул не JSON. Попробуй ещё раз.",
         )
-
         user_photos[user_id] = []
 
     except Exception as e:
         logger.error("Error: %s", e)
-
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"❌ Ошибка: {str(e)}\nПопробуй снова.",
         )
-
         user_photos[user_id] = []
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_photos[user_id] = []
-
     await update.message.reply_text("🗑 Фото очищены. Начни заново — отправь фото или файл.")
 
 
@@ -476,10 +518,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
-
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE, handle_document))
-
     app.add_handler(CallbackQueryHandler(process_photos, pattern="process"))
 
     app.run_polling()
