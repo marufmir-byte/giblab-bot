@@ -16,13 +16,18 @@ from telegram.ext import (
     filters,
 )
 
+# Основные логи
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Убираем подробные httpx-логи, чтобы Telegram-токен не светился в Railway Logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# Модель можно менять в Railway через переменную ANTHROPIC_MODEL.
+# Модель можно менять в Railway через переменную ANTHROPIC_MODEL
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -59,6 +64,8 @@ SYSTEM_PROMPT = """Ты помощник для анализа списков д
 550 → 550
 150 → 150
 303 → 303
+133 → 133
+70 → 70
 
 2. Если число написано с точкой, убирай точку:
 39.8 → 398
@@ -87,7 +94,8 @@ SYSTEM_PROMPT = """Ты помощник для анализа списков д
 - линии таблицы;
 - вертикальные линии;
 - рамки ячеек;
-- границы строк.
+- границы строк;
+- линии между строками.
 
 Учитывай только короткую чёрную линию прямо под самим числом.
 
@@ -135,6 +143,7 @@ SYSTEM_PROMPT = """Ты помощник для анализа списков д
 - Не придумывай детали, которых нет на фото.
 - Не пропускай подчёркивания.
 - Если строка плохо читается, всё равно постарайся распознать.
+- Для каждой детали обязательно верни поля: length, width, qty, e, f, g, h.
 - Возвращай только валидный JSON.
 - Никакого текста до JSON и после JSON.
 - Никакого markdown.
@@ -228,7 +237,12 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content.append(
             {
                 "type": "text",
-                "text": "Проанализируй все фото. Особое внимание удели коротким чёрным подчёркиваниям прямо под числами: они означают кромку. Верни JSON со ВСЕМИ деталями из всех фото одним списком. Для каждой строки обязательно заполни length, width, qty, e, f, g, h.",
+                "text": (
+                    "Проанализируй все фото. "
+                    "Особое внимание удели коротким чёрным подчёркиваниям прямо под числами: они означают кромку. "
+                    "Верни JSON со ВСЕМИ деталями из всех фото одним списком. "
+                    "Для каждой строки обязательно заполни length, width, qty, e, f, g, h."
+                ),
             }
         )
 
@@ -246,8 +260,8 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         raw = response.content[0].text.strip()
 
-        # Показываем сырой ответ Claude в Railway Logs.
-        # Это нужно, чтобы понять: кромка теряется у Claude или уже в Excel.
+        # Сырой ответ Claude в Railway Logs.
+        # Здесь можно проверить, увидел ли Claude кромку.
         logger.info("Claude raw answer: %s", raw)
 
         if "```json" in raw:
@@ -271,16 +285,25 @@ async def process_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ws.title = "GibLab"
 
         for p in parts:
+            length = p.get("length", "")
+            width = p.get("width", "")
+            qty = p.get("qty", "")
+
+            e = p.get("e", "")
+            f = p.get("f", "")
+            g = p.get("g", "")
+            h = p.get("h", "")
+
             ws.append(
                 [
-                    p.get("length", ""),
-                    p.get("width", ""),
-                    p.get("qty", ""),
+                    length,
+                    width,
+                    qty,
                     "",
-                    p.get("e", ""),
-                    p.get("f", ""),
-                    p.get("g", ""),
-                    p.get("h", ""),
+                    e,
+                    f,
+                    g,
+                    h,
                 ]
             )
 
