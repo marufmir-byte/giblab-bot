@@ -2,7 +2,6 @@ import os
 import json
 import base64
 import logging
-import threading
 from io import BytesIO
 
 from aiohttp import web
@@ -633,24 +632,19 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # -----------------------------
 
-def run_health_server():
+async def post_init(application):
     async def health(request):
         return web.Response(text="GibLab bot is running")
 
-    async def serve():
-        app = web.Application()
-        app.router.add_get("/", health)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        port = int(os.environ.get("PORT", "10000"))
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        logger.info("Health server started on port %s", port)
-        while True:
-            await __import__("asyncio").sleep(3600)
-
-    __import__("asyncio").run(serve())
-
+    health_app = web.Application()
+    health_app.router.add_get("/", health)
+    runner = web.AppRunner(health_app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    application.bot_data["health_runner"] = runner
+    logger.info("Health server started on port %s", port)
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -661,9 +655,7 @@ def main():
 
     logger.info("Bot started. Model candidates: %s", MODEL_CANDIDATES)
 
-    threading.Thread(target=run_health_server, daemon=True).start()
-
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
